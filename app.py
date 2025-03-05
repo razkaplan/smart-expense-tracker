@@ -1,10 +1,11 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
 import yfinance as yf
+import fitz  # PyMuPDF for PDF parsing
+import re
 import requests
 from bs4 import BeautifulSoup
-import re
+from datetime import datetime
 
 @st.cache_data(ttl=86400)  # Cache for 24 hours
 def get_stock_exchanges_companies():
@@ -120,6 +121,53 @@ def match_company_to_ticker(merchant_name, company_map):
     
     return None
 
-# Example usage in Streamlit app would involve:
-# global_companies = get_stock_exchanges_companies()
-# transactions_df['Ticker'] = transactions_df['Merchant'].apply(lambda x: match_company_to_ticker(x, global_companies))
+# Rest of your existing code remains the same...
+def extract_transactions(pdf_file):
+    transactions = []
+    raw_text = ""
+    
+    with fitz.open(stream=pdf_file.read(), filetype="pdf") as doc:
+        for page in doc:
+            text = page.get_text("text")
+            raw_text += text + "\n"
+            
+            # Look for the transaction table section
+            table_section = text.split("פירוט ענף שם בית העסק תאריך")
+            if len(table_section) > 1:
+                lines = table_section[1].split("\n")
+                
+                for line in lines:
+                    # Regex to match transaction lines
+                    match = re.match(r'^₪\s*([\d,.]+)\s*₪\s*([\d,.]+).*\s*(\d{2}/\d{2}/\d{4})$', line.strip())
+                    if match:
+                        try:
+                            amount = float(match.group(1).replace(',', ''))
+                            date_str = match.group(3)
+                            
+                            # Find merchant name (the text between amount and date)
+                            merchant_match = re.search(r'₪\s*[\d,.]+\s*(.+?)\s*₪', line)
+                            merchant = merchant_match.group(1).strip() if merchant_match else "Unknown"
+                            
+                            transactions.append({
+                                "Date": pd.to_datetime(date_str, format='%d/%m/%Y'),
+                                "Merchant": merchant,
+                                "Amount": amount,
+                                "Currency": "₪"
+                            })
+                        except Exception as e:
+                            st.warning(f"Could not parse transaction: {line}. Error: {e}")
+    
+    # Create DataFrame
+    if transactions:
+        df = pd.DataFrame(transactions)
+        return raw_text, df
+    else:
+        st.error("❌ No transactions could be extracted.")
+        return raw_text, pd.DataFrame()
+
+# Load global companies (this will be done when the script runs)
+global_companies = get_stock_exchanges_companies()
+
+# The rest of your Streamlit app code remains the same...
+# When adding tickers, use:
+# transactions_df["Ticker"] = transactions_df["Merchant"].apply(lambda x: match_company_to_ticker(x, global_companies))
