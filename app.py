@@ -32,22 +32,22 @@ global_companies = load_global_companies()
 
 def extract_transactions(pdf_file):
     transactions = []
+    raw_text = ""
+    
     with fitz.open(stream=pdf_file.read(), filetype="pdf") as doc:
         for page in doc:
             text = page.get_text("text")
+            raw_text += text + "\n"
             lines = text.split("\n")
             for line in lines:
-                match = re.search(r'(\d{4}[-/]\d{2}[-/]\d{2})\s+(.+?)\s+[₪$€£]\s?([\d,.]+)', line)
+                match = re.search(r'(\d{2}/\d{2}/\d{4}|\d{4}[-/]\d{2}[-/]\d{2})\s+(.+?)\s+[₪$€£]\s?([\d,.]+)', line)
                 if match:
                     date, merchant, amount = match.groups()
                     currency = "₪" if "₪" in line else ("$" if "$" in line else ("€" if "€" in line else "£"))
                     amount = float(amount.replace(',', ''))  # Remove thousands separator
                     transactions.append({"Date": date, "Merchant": merchant.strip(), "Amount": amount, "Currency": currency})
     
-    if not transactions:
-        print("DEBUG: No transactions extracted. Check PDF structure.")
-    
-    return pd.DataFrame(transactions)
+    return raw_text, pd.DataFrame(transactions)
 
 def get_stock_ticker(merchant):
     merchant_cleaned = merchant.lower()
@@ -63,7 +63,11 @@ st.markdown(title_html, unsafe_allow_html=True)
 uploaded_file = st.file_uploader("📂 Upload a PDF expense report", type=["pdf"])
 
 if uploaded_file:
-    transactions_df = extract_transactions(uploaded_file)
+    raw_text, transactions_df = extract_transactions(uploaded_file)
+    
+    st.subheader("📄 Raw Extracted PDF Text")
+    st.text_area("Text Preview", raw_text[:2000], height=300)  # Show only first 2000 characters
+    
     if transactions_df.empty:
         st.error("⚠️ No valid transactions found. Please check your PDF format.")
     else:
