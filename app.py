@@ -1,89 +1,125 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import yfinance as yf
-import fitz  # PyMuPDF for PDF parsing
+import requests
+from bs4 import BeautifulSoup
 import re
 
-# Load global stock market companies
-@st.cache_data
-def load_global_companies():
-    sources = {
-        "S&P 500": "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
-        "NASDAQ 100": "https://en.wikipedia.org/wiki/NASDAQ-100",
-        "FTSE 100": "https://en.wikipedia.org/wiki/FTSE_100_Index",
-        "DAX 40": "https://en.wikipedia.org/wiki/DAX",
-        "Nikkei 225": "https://en.wikipedia.org/wiki/Nikkei_225"
-    }
+@st.cache_data(ttl=86400)  # Cache for 24 hours
+def get_stock_exchanges_companies():
+    """
+    Comprehensive function to scrape company lists from multiple stock exchanges
+    """
     company_map = {}
-    
-    for index, url in sources.items():
+
+    # Helper function to clean and standardize company names
+    def clean_name(name):
+        # Remove special characters, convert to lowercase
+        return re.sub(r'[^\w\s]', '', str(name)).lower().strip()
+
+    # Sources for different stock exchanges
+    exchanges = [
+        # US Exchanges
+        {
+            'name': 'S&P 500',
+            'url': 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies',
+            'name_col': 'Security',
+            'symbol_col': 'Symbol'
+        },
+        {
+            'name': 'NASDAQ 100',
+            'url': 'https://en.wikipedia.org/wiki/NASDAQ-100',
+            'name_col': 'Company',
+            'symbol_col': 'Ticker'
+        },
+        # Israeli Stock Exchange
+        {
+            'name': 'Tel Aviv Stock Exchange (TASE)',
+            'url': 'https://en.wikipedia.org/wiki/List_of_companies_listed_on_the_Tel_Aviv_Stock_Exchange',
+            'name_col': 'Company',
+            'symbol_col': 'Symbol'
+        },
+        # London Stock Exchange
+        {
+            'name': 'FTSE 100',
+            'url': 'https://en.wikipedia.org/wiki/FTSE_100_Index',
+            'name_col': 'Company',
+            'symbol_col': 'Ticker'
+        },
+        # European Exchanges
+        {
+            'name': 'DAX 40',
+            'url': 'https://en.wikipedia.org/wiki/DAX',
+            'name_col': 'Company',
+            'symbol_col': 'Ticker'
+        }
+    ]
+
+    # Scrape company lists from Wikipedia
+    for exchange in exchanges:
         try:
-            df = pd.read_html(url)[0]
-            if "Security" in df.columns:
-                company_map.update(dict(zip(df["Security"].str.lower(), df["Symbol"])))
-            elif "Company" in df.columns:
-                company_map.update(dict(zip(df["Company"].str.lower(), df["Ticker"])))
+            tables = pd.read_html(exchange['url'])
+            for table in tables:
+                # Check if required columns exist
+                if exchange['name_col'] in table.columns and exchange['symbol_col'] in table.columns:
+                    # Clean and map company names to tickers
+                    company_map.update(dict(
+                        zip(
+                            [clean_name(name) for name in table[exchange['name_col']]],
+                            table[exchange['symbol_col']]
+                        )
+                    ))
+                    break  # Use first matching table
         except Exception as e:
-            print(f"Failed to load {index}: {e}")
-    
+            st.warning(f"Could not scrape {exchange['name']}: {e}")
+
+    # Additional custom sources
+    additional_sources = [
+        # Some top global companies not always in Wikipedia lists
+        {
+            'companies': {
+                'apple': 'AAPL',
+                'microsoft': 'MSFT',
+                'amazon': 'AMZN',
+                'google': 'GOOGL',
+                'facebook': 'META',
+                'tesla': 'TSLA',
+                'netflix': 'NFLX',
+                'intel': 'INTC',
+                'nvidia': 'NVDA',
+                'adobe': 'ADBE',
+                'paypal': 'PYPL',
+                'visa': 'V',
+                'mastercard': 'MA'
+            }
+        }
+    ]
+
+    # Add additional sources
+    for source in additional_sources:
+        company_map.update(source['companies'])
+
     return company_map
 
-global_companies = load_global_companies()
-
-def extract_transactions(pdf_file):
-    transactions = []
-    raw_text = ""
-    
-    with fitz.open(stream=pdf_file.read(), filetype="pdf") as doc:
-        for page in doc:
-            text = page.get_text("text")
-            raw_text += text + "\n"
-            lines = text.split("\n")
-            for line in lines:
-                match = re.search(r'(\d{2}/\d{2}/\d{4}|\d{4}[-/]\d{2}[-/]\d{2})\s+(.+?)\s+[₪$€£]\s?([\d,.]+)', line)
-                if match:
-                    date, merchant, amount = match.groups()
-                    currency = "₪" if "₪" in line else ("$" if "$" in line else ("€" if "€" in line else "£"))
-                    amount = float(amount.replace(',', ''))  # Remove thousands separator
-                    transactions.append({"Date": date, "Merchant": merchant.strip(), "Amount": amount, "Currency": currency})
-    
-    return raw_text, pd.DataFrame(transactions)
-
-def get_stock_ticker(merchant):
-    merchant_cleaned = merchant.lower()
-    return global_companies.get(merchant_cleaned, None)
-
-# Modern UI
-title_html = """
-    <h1 style='text-align: center; color: #4CAF50;'>💳 Smart Expense to Investment Tracker 📈</h1>
-    <p style='text-align: center; font-size: 18px;'>Upload your credit card report and see how your spending connects to stock performance.</p>
+def match_company_to_ticker(merchant_name, company_map):
     """
-st.markdown(title_html, unsafe_allow_html=True)
-
-uploaded_file = st.file_uploader("📂 Upload a PDF expense report", type=["pdf"])
-
-if uploaded_file:
-    raw_text, transactions_df = extract_transactions(uploaded_file)
+    Advanced company name matching algorithm
+    """
+    # Clean merchant name
+    cleaned_merchant = re.sub(r'[^\w\s]', '', str(merchant_name)).lower().strip()
     
-    st.subheader("📄 Raw Extracted PDF Text")
-    st.text_area("Text Preview", raw_text[:2000], height=300)  # Show only first 2000 characters
+    # Exact match
+    if cleaned_merchant in company_map:
+        return company_map[cleaned_merchant]
     
-    if transactions_df.empty:
-        st.error("⚠️ No valid transactions found. Please check your PDF format.")
-    else:
-        transactions_df["Ticker"] = transactions_df["Merchant"].apply(get_stock_ticker)
-        transactions_df = transactions_df.dropna(subset=["Ticker"])
-        
-        st.subheader("📜 Extracted Transactions")
-        st.dataframe(transactions_df.style.set_properties(**{'text-align': 'center'}))
-        
-        stock_data = {}
-        for _, row in transactions_df.iterrows():
-            ticker = row["Ticker"]
-            stock = yf.Ticker(ticker)
-            history = stock.history(period="6mo")  # Fetch last 6 months of data
-            stock_data[ticker] = history
-        
-        st.subheader("📊 Stock Performance")
-        for ticker, history in stock_data.items():
-            st.line_chart(history["Close"], use_container_width=True)
+    # Partial match
+    for company_name, ticker in company_map.items():
+        if company_name in cleaned_merchant or cleaned_merchant in company_name:
+            return ticker
+    
+    return None
+
+# Example usage in Streamlit app would involve:
+# global_companies = get_stock_exchanges_companies()
+# transactions_df['Ticker'] = transactions_df['Merchant'].apply(lambda x: match_company_to_ticker(x, global_companies))
