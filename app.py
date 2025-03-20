@@ -17,22 +17,39 @@ import sys
 from parse_credit_card import is_probably_english, extract_transactions
 import plotly.express as px
 import plotly.graph_objects as go
+import os
+import pytz
+import pymupdf
+from io import BytesIO
+import numpy as np
 
 # Constants for company information
 INTERNATIONAL_COMPANIES = [
-    {'name': 'Netflix', 'ticker': 'NFLX', 'exchange': 'NASDAQ'},
-    {'name': 'Google', 'ticker': 'GOOGL', 'exchange': 'NASDAQ'},
-    {'name': 'Alibaba', 'ticker': 'BABA', 'exchange': 'NYSE'},
-    {'name': 'Amazon', 'ticker': 'AMZN', 'exchange': 'NASDAQ'},
-    {'name': 'Apple', 'ticker': 'AAPL', 'exchange': 'NASDAQ'},
-    {'name': 'Microsoft', 'ticker': 'MSFT', 'exchange': 'NASDAQ'},
-    {'name': 'Meta', 'ticker': 'META', 'exchange': 'NASDAQ'}
+    {'name': 'Netflix', 'ticker': 'NFLX', 'exchange': 'NASDAQ', 'aliases': ['netflix', 'netflix.com']},
+    {'name': 'Google', 'ticker': 'GOOGL', 'exchange': 'NASDAQ', 'aliases': ['google', 'youtube', 'alphabet', 'google*']},
+    {'name': 'Alibaba', 'ticker': 'BABA', 'exchange': 'NYSE', 'aliases': ['ali', 'aliexpress', 'alibaba']},
+    {'name': 'Amazon', 'ticker': 'AMZN', 'exchange': 'NASDAQ', 'aliases': ['amazon', 'aws', 'kindle', 'amazon prime']},
+    {'name': 'Apple', 'ticker': 'AAPL', 'exchange': 'NASDAQ', 'aliases': ['apple', 'itunes', 'apple store', 'icloud']},
+    {'name': 'Microsoft', 'ticker': 'MSFT', 'exchange': 'NASDAQ', 'aliases': ['microsoft', 'xbox', 'ms', 'msft', 'azure']},
+    {'name': 'Meta', 'ticker': 'META', 'exchange': 'NASDAQ', 'aliases': ['meta', 'facebook', 'instagram', 'fb', 'whatsapp']},
+    {'name': 'Tesla', 'ticker': 'TSLA', 'exchange': 'NASDAQ', 'aliases': ['tesla', 'tsla']},
+    {'name': 'Disney', 'ticker': 'DIS', 'exchange': 'NYSE', 'aliases': ['disney', 'disney+', 'disneyplus']},
+    {'name': 'PayPal', 'ticker': 'PYPL', 'exchange': 'NASDAQ', 'aliases': ['paypal', 'pay pal']},
+    {'name': 'Uber', 'ticker': 'UBER', 'exchange': 'NYSE', 'aliases': ['uber', 'uber eats']},
+    {'name': 'Spotify', 'ticker': 'SPOT', 'exchange': 'NYSE', 'aliases': ['spotify', 'spot']}
 ]
 
 ISRAELI_COMPANIES = [
-    {'name': 'Partner', 'ticker': 'PTNR.TA'},
-    {'name': 'Cellcom', 'ticker': 'CEL.TA'},
-    {'name': 'Menora', 'ticker': 'MMHD.TA'}
+    {'name': 'Partner', 'ticker': 'PTNR.TA', 'aliases': ['פרטנר', 'partner', 'פרטנר תקשורת']},
+    {'name': 'Cellcom', 'ticker': 'CEL.TA', 'aliases': ['סלקום', 'cellcom', 'סלקום ישראל']},
+    {'name': 'Menora', 'ticker': 'MMHD.TA', 'aliases': ['מנורה', 'menora', 'מבטחים', 'מנורה מבטחים']},
+    {'name': 'Bank Leumi', 'ticker': 'LUMI.TA', 'aliases': ['לאומי', 'leumi', 'בנק לאומי']},
+    {'name': 'Bank Hapoalim', 'ticker': 'POLI.TA', 'aliases': ['פועלים', 'hapoalim', 'בנק הפועלים']},
+    {'name': 'Bank Discount', 'ticker': 'DSCT.TA', 'aliases': ['דיסקונט', 'discount', 'בנק דיסקונט']},
+    {'name': 'Strauss', 'ticker': 'STRS.TA', 'aliases': ['שטראוס', 'strauss', 'שטראוס גרופ']},
+    {'name': 'Meitav', 'ticker': 'MTDS.TA', 'aliases': ['מיטב', 'meitav', 'מיטב דש', 'מיטב-דש']},
+    {'name': 'El Al', 'ticker': 'ELAL.TA', 'aliases': ['אל על', 'elal', 'el al', 'אל-על']},
+    {'name': 'Yohananof', 'ticker': 'YHNF.TA', 'aliases': ['יוחננוף', 'yohananof', 'יוחננוף ובניו']}
 ]
 
 # Enable debug mode
@@ -441,9 +458,15 @@ def get_stock_performance(ticker, date, amount):
     try:
         debug_print(f"Calculating performance for {ticker} from {date} with amount {amount} ₪")
         
-        # Convert amount from ILS to USD
-        usd_amount = amount * 0.28  # Using a fixed rate for now
-        debug_print(f"Converting {amount} ILS to {usd_amount:.2f} USD using rate 0.28")
+        # Convert amount from ILS to USD if needed
+        if '.TA' in ticker:
+            # TASE stocks are already in ILS
+            currency_amount = amount
+            debug_print(f"TASE stock detected, keeping amount in ILS: {currency_amount:.2f} ILS")
+        else:
+            # International stocks need USD conversion
+            currency_amount = amount * 0.28  # Using a fixed rate for now
+            debug_print(f"Converting {amount} ILS to {currency_amount:.2f} USD using rate 0.28")
         
         # Handle date format conversion
         if '-' in str(date):
@@ -456,8 +479,12 @@ def get_stock_performance(ticker, date, amount):
         try:
             transaction_date = datetime.strptime(date, '%d/%m/%Y')
         except ValueError:
-            debug_print(f"Error parsing date {date} with format DD/MM/YYYY")
-            return None, None
+            try:
+                # Try alternative format YYYY/MM/DD
+                transaction_date = datetime.strptime(date, '%Y/%m/%d')
+            except ValueError:
+                debug_print(f"Error parsing date {date} with any known format")
+                return None, None
         
         # Skip future dates
         if transaction_date > datetime.now():
@@ -488,7 +515,7 @@ def get_stock_performance(ticker, date, amount):
         debug_print(f"Current price for {ticker}: ${current_price:.2f}")
         
         # Calculate performance
-        shares = usd_amount / first_price
+        shares = currency_amount / first_price
         value_change = shares * (current_price - first_price)
         percent_change = ((current_price - first_price) / first_price) * 100
         
@@ -501,109 +528,231 @@ def get_stock_performance(ticker, date, amount):
         debug_print(f"Error calculating performance for {ticker}: {str(e)}")
         return None, None
 
-def find_company_transactions(transactions_df, company_name):
-    """Find all transactions related to a specific company."""
-    # Case-insensitive search for company name in Merchant column with multiple patterns
-    lower_name = company_name.lower()
-    upper_name = company_name.upper()
+def find_company_transactions(df, company_name, aliases=None):
+    """
+    Find transactions related to a specific company.
     
-    # Use more flexible matching patterns
-    mask = (
-        transactions_df['Merchant'].str.contains(company_name, case=False, na=False) |
-        transactions_df['Merchant'].str.contains(lower_name, case=False, na=False) |
-        transactions_df['Merchant'].str.contains(upper_name, case=False, na=False)
-    )
+    Args:
+        df (DataFrame): DataFrame containing transactions
+        company_name (str): Name of the company to search for
+        aliases (list, optional): List of alternative names for the company
+        
+    Returns:
+        DataFrame: Transactions related to the company
+    """
+    if df is None or df.empty:
+        debug_print(f"No transactions provided for company: {company_name}")
+        return pd.DataFrame()
     
-    # Special case for Alibaba/AliExpress
-    if company_name.lower() in ['alibaba', 'ali']:
-        mask = mask | transactions_df['Merchant'].str.contains('ali', case=False, na=False)
+    # Prepare search terms - company name and any aliases
+    search_terms = [company_name.lower()]
+    if aliases:
+        search_terms.extend([alias.lower() for alias in aliases])
     
-    # Special case for Google/YouTube
+    # Create a mask to match any of the terms
+    mask = pd.Series(False, index=df.index)
+    for term in search_terms:
+        # Check for exact match, contains match, or fuzzy match
+        term_mask = df['Merchant'].str.lower().str.contains(term, case=False, na=False, regex=True)
+        
+        # For shorter terms (3 characters or less), require more strict matching to avoid false positives
+        if len(term) <= 3:
+            # For very short terms, require them to be standalone words or with punctuation boundaries
+            term_mask = df['Merchant'].str.lower().str.contains(r'\b' + term + r'\b|^' + term + r'|' + term + r'$', 
+                                                              case=False, na=False, regex=True)
+        
+        mask = mask | term_mask
+    
+    # Special case for google - it might appear as "GOOGLE*" in transactions
     if company_name.lower() == 'google':
-        mask = mask | transactions_df['Merchant'].str.contains('youtube', case=False, na=False)
+        mask = mask | df['Merchant'].str.lower().str.contains('google[*]', case=False, na=False, regex=True)
     
-    company_transactions = transactions_df[mask].copy()
+    # Special case for netflix - might appear with .com or without spaces
+    if company_name.lower() == 'netflix':
+        mask = mask | df['Merchant'].str.lower().str.contains('netflix\.com', case=False, na=False, regex=True)
     
-    debug_print(f"Found {len(company_transactions)} transactions for {company_name}")
-    return company_transactions
+    # Special case for amazon - might appear with various suffixes
+    if company_name.lower() == 'amazon':
+        amazon_patterns = ['amazon\.', 'amzn', 'prime']
+        for pattern in amazon_patterns:
+            mask = mask | df['Merchant'].str.lower().str.contains(pattern, case=False, na=False, regex=True)
+    
+    # Special case for payment processors like PayPal that might be connected to various merchants
+    if company_name.lower() in ['paypal', 'bit', 'פייפאל']:
+        mask = mask | df['Merchant'].str.lower().str.contains(r'\bpaypal\b|\bפייפאל\b|\bביט\b|\bbit\b', 
+                                                            case=False, na=False, regex=True)
+    
+    # Check for hebrew company names (handle RTL issues)
+    hebrew_company_mappings = {
+        'partner': ['פרטנר', 'רנטרפ'],
+        'cellcom': ['סלקום', 'םוקלס'],
+        'menora': ['מנורה', 'הרונמ', 'מבטחים', 'םיחטבמ'],
+        'discount': ['דיסקונט', 'טנוקסיד'],
+        'leumi': ['לאומי', 'ימואל'],
+        'hapoalim': ['הפועלים', 'םילעופה'],
+        'strauss': ['שטראוס', 'סוארטש'],
+        'el al': ['אל על', 'לע לא'],
+    }
+    
+    # Check for possible Hebrew names
+    lower_company = company_name.lower()
+    if lower_company in hebrew_company_mappings:
+        for hebrew_name in hebrew_company_mappings[lower_company]:
+            mask = mask | df['Merchant'].str.contains(hebrew_name, case=False, na=False, regex=False)
+    
+    results = df[mask].copy()
+    debug_print(f"Found {len(results)} transactions for {company_name}")
+    
+    # Log what was found for debugging
+    for _, row in results.iterrows():
+        debug_print(f"Found transaction matching {company_name}: {row['Merchant']}")
+    
+    return results
 
 def get_companies_with_transactions(transactions_df):
     """Get a DataFrame of companies and their transactions."""
     companies_data = []
+    
+    debug_print(f"Transaction dataframe has {len(transactions_df)} rows with columns: {transactions_df.columns.tolist()}")
     
     # Process international companies
     for company_info in INTERNATIONAL_COMPANIES:
         company_name = company_info['name']
         ticker = company_info['ticker']
         exchange = company_info['exchange']
+        aliases = company_info.get('aliases', [])
         
-        transactions = find_company_transactions(transactions_df, company_name)
-        if not transactions.empty:
-            companies_data.append({
-                'Company': company_name,
-                'Ticker': ticker,
-                'Exchange': exchange,
-                'Transactions': transactions
-            })
+        try:
+            transactions = find_company_transactions(transactions_df, company_name, aliases)
+            
+            if not transactions.empty:
+                for _, trans in transactions.iterrows():
+                    companies_data.append({
+                        'Company': company_name,
+                        'Ticker': ticker,
+                        'Exchange': exchange,
+                        'Transaction': trans
+                    })
+                debug_print(f"Found {len(transactions)} transactions for {company_name} ({ticker})")
+        except Exception as e:
+            debug_print(f"Error processing {company_name}: {e}")
+            debug_print(traceback.format_exc())
     
-    # Process Israeli companies
+    # Process Israeli companies - improved detection
     for company_info in ISRAELI_COMPANIES:
         company_name = company_info['name']
         ticker = company_info['ticker']
+        exchange = 'TASE'  # Tel Aviv Stock Exchange
+        aliases = company_info.get('aliases', [])
         
-        transactions = find_company_transactions(transactions_df, company_name)
-        if not transactions.empty:
-            companies_data.append({
-                'Company': company_name,
-                'Ticker': ticker,
-                'Exchange': 'TASE',
-                'Transactions': transactions
-            })
+        try:
+            # Enhanced debugging for TASE companies
+            debug_print(f"Searching for TASE company: {company_name} with aliases: {aliases}")
+            
+            # Look specifically for Hebrew text in the transaction description
+            transactions = find_company_transactions(transactions_df, company_name, aliases)
+            
+            # For Partner Communications - specific handling for "רנטרפ" appearing in statements
+            if company_name == 'Partner' and transactions.empty:
+                debug_print("Force processing special company: Partner with ticker PTNR.TA")
+                # Look for partner in any transaction with תקשורת (communications in Hebrew)
+                partner_mask = transactions_df['Merchant'].str.contains('תקשורת') & transactions_df['Merchant'].str.contains('פרטנר|רנטרפ|partner', case=False, regex=True)
+                transactions = transactions_df[partner_mask].copy()
+            
+            # For Cellcom - specific handling
+            if company_name == 'Cellcom' and transactions.empty:
+                debug_print("Force processing special company: Cellcom with ticker CEL.TA")
+                # Look for cellcom in any transaction with תקשורת שירות or סלקום
+                cellcom_mask = (transactions_df['Merchant'].str.contains('תקשורת שירות') | 
+                               transactions_df['Merchant'].str.contains('סלקום|םוקלס|cellcom', case=False, regex=True))
+                transactions = transactions_df[cellcom_mask].copy()
+            
+            # For Menora - specific handling
+            if company_name == 'Menora' and transactions.empty:
+                debug_print("Force processing special company: Menora with ticker MMHD.TA")
+                # Look for menora in any transaction with מבטחים
+                menora_mask = transactions_df['Merchant'].str.contains('מבטחים|םיחטבמ|מנורה|הרונמ|menora', case=False, regex=True)
+                transactions = transactions_df[menora_mask].copy()
+                
+            # For Yohananof - specific handling
+            if company_name == 'Yohananof' and transactions.empty:
+                debug_print("Force processing special company: Yohananof with ticker YHNF.TA")
+                # Look for Yohananof in any transaction with supermarket-related terms
+                yohananof_mask = (transactions_df['Merchant'].str.contains('יוחננוף|ףוננחוי', case=False, regex=True) | 
+                                 transactions_df['Merchant'].str.contains('סופר שוק|סופרמרקט|קוש רפוס', case=False, regex=True))
+                transactions = transactions_df[yohananof_mask].copy()
+            
+            if not transactions.empty:
+                for _, trans in transactions.iterrows():
+                    companies_data.append({
+                        'Company': company_name,
+                        'Ticker': ticker,
+                        'Exchange': exchange,
+                        'Transaction': trans
+                    })
+                debug_print(f"Found {len(transactions)} transactions for {company_name} ({ticker}) [TASE]")
+        except Exception as e:
+            debug_print(f"Error processing TASE company {company_name}: {e}")
+            debug_print(traceback.format_exc())
     
-    return pd.DataFrame(companies_data)
+    # Create DataFrame from companies_data
+    if companies_data:
+        companies_df = pd.DataFrame(companies_data)
+        return companies_df
+    else:
+        debug_print("No companies with transactions found")
+        return pd.DataFrame(columns=['Company', 'Ticker', 'Exchange', 'Transaction'])
 
 def calculate_investment_performance(companies_df):
-    debug_print("Calculating investment performance for all companies...")
+    """Calculate investment performance for companies based on transaction data."""
+    if companies_df is None or companies_df.empty:
+        debug_print("No companies with transactions data provided")
+        return pd.DataFrame()
+    
     results = []
     
     for _, row in companies_df.iterrows():
         company_name = row['Company']
         ticker = row['Ticker']
         exchange = row['Exchange']
-        transactions = row['Transactions']
+        transaction = row['Transaction']
         
-        debug_print(f"\nProcessing {company_name} ({ticker}) on {exchange}:")
-        
-        # Iterate over DataFrame rows using itertuples() for better performance
-        for t in transactions.itertuples():
-            date = getattr(t, 'Date')
-            amount = getattr(t, 'Amount')
+        try:
+            # Extract transaction date and amount
+            transaction_date = transaction['Date']
+            transaction_amount = transaction['Amount']
             
-            debug_print(f"  Transaction date: {date}")
-            debug_print(f"  Transaction amount: {amount} ₪")
+            debug_print(f"\nProcessing {company_name} ({ticker}) on {exchange}:")
+            debug_print(f"  Transaction date: {transaction_date}")
+            debug_print(f"  Transaction amount: {transaction_amount} ₪")
             
-            percent_change, value_change = get_stock_performance(ticker, date, amount)
+            # Calculate performance
+            percent_change, value_change = get_stock_performance(ticker, transaction_date, transaction_amount)
+            debug_print(f"  Performance calculated: {percent_change:.2f}%, {value_change:.2f} ₪")
             
-            if percent_change is not None and value_change is not None:
-                result = {
-                    'Company': company_name,
-                    'Ticker': ticker,
-                    'Exchange': exchange,
-                    'Transaction Date': date,
-                    'Amount (₪)': amount,
-                    'Value Change (₪)': value_change,
-                    'Percent Change': percent_change
-                }
-                results.append(result)
-            else:
-                debug_print(f"  Failed to calculate performance for transaction")
+            # Add to results
+            results.append({
+                'Company': company_name,
+                'Ticker': ticker,
+                'Exchange': exchange,
+                'Transaction Date': transaction_date,
+                'Amount (₪)': transaction_amount,
+                'Value Change (₪)': value_change,
+                'Percent Change': percent_change
+            })
+        except Exception as e:
+            debug_print(f"Error calculating performance for {company_name}: {e}")
+            debug_print(traceback.format_exc())
     
-    if results:
-        return pd.DataFrame(results)
-    else:
-        debug_print("No performance results calculated")
-        return pd.DataFrame(columns=['Company', 'Ticker', 'Exchange', 'Transaction Date', 
-                                   'Amount (₪)', 'Value Change (₪)', 'Percent Change'])
+    if not results:
+        # Return empty DataFrame with expected columns
+        return pd.DataFrame(columns=[
+            'Company', 'Ticker', 'Exchange', 'Transaction Date', 'Amount (₪)', 
+            'Value Change (₪)', 'Percent Change'
+        ])
+    
+    # Convert results to DataFrame
+    return pd.DataFrame(results)
 
 def main():
     st.set_page_config(
@@ -711,6 +860,9 @@ def main():
                 performance_data = calculate_investment_performance(companies_with_transactions)
 
                 if not performance_data.empty:
+                    # Add Current Value column
+                    performance_data['Current Value (₪)'] = performance_data['Amount (₪)'] + performance_data['Value Change (₪)']
+                    
                     # Display summary metrics
                     col1, col2, col3 = st.columns(3)
                     with col1:
@@ -718,22 +870,55 @@ def main():
                         st.metric("Total Invested", f"₪{total_invested:,.2f}")
                     
                     with col2:
-                        total_current = performance_data['Amount (₪)'].sum()
+                        total_current = performance_data['Current Value (₪)'].sum()
                         st.metric("Total Current Value", f"₪{total_current:,.2f}")
                     
                     with col3:
-                        weighted_return = (performance_data['Percent Change'] * performance_data['Amount (₪)']).sum() / total_invested
-                        st.metric("Weighted Average Return", f"{weighted_return:.1f}%")
-
-                    # Display performance details
-                    st.subheader("Performance Details")
+                        weighted_return = (performance_data['Percent Change'] * performance_data['Amount (₪)']).sum() / total_invested if total_invested > 0 else 0
+                        st.metric("Weighted Return", f"{weighted_return:.2f}%")
+                    
+                    # Display performance data
+                    st.subheader("Investment Performance")
+                    
+                    # Group by company
+                    company_performance = performance_data.groupby(['Company', 'Ticker', 'Exchange']).agg({
+                        'Amount (₪)': 'sum',
+                        'Value Change (₪)': 'sum',
+                        'Current Value (₪)': 'sum',
+                        'Percent Change': lambda x: (x * performance_data.loc[x.index, 'Amount (₪)']).sum() / performance_data.loc[x.index, 'Amount (₪)'].sum()
+                    }).reset_index()
                     
                     # Configure the DataFrame display
-                    performance_data['Amount (₪)'] = performance_data['Amount (₪)'].apply(lambda x: f"₪{x:,.2f}")
-                    performance_data['Percent Change'] = performance_data['Percent Change'].apply(lambda x: f"{x:.1f}%")
-                    performance_data['Value Change (₪)'] = performance_data['Value Change (₪)'].apply(lambda x: f"₪{x:,.2f}")
+                    st.dataframe(
+                        company_performance,
+                        column_config={
+                            "Company": st.column_config.TextColumn("Company"),
+                            "Ticker": st.column_config.TextColumn("Ticker"),
+                            "Exchange": st.column_config.TextColumn("Exchange"),
+                            "Amount (₪)": st.column_config.NumberColumn("Amount (₪)", format="₪%.2f"),
+                            "Value Change (₪)": st.column_config.NumberColumn("Value Change (₪)", format="₪%.2f"),
+                            "Current Value (₪)": st.column_config.NumberColumn("Current Value (₪)", format="₪%.2f"),
+                            "Percent Change": st.column_config.NumberColumn("Percent Change", format="%.2f%%"),
+                        },
+                        hide_index=True,
+                    )
                     
-                    st.dataframe(performance_data, use_container_width=True)
+                    # Add an expander for the transaction-level details
+                    with st.expander("Transaction-level Details"):
+                        st.dataframe(
+                            performance_data,
+                            column_config={
+                                "Company": st.column_config.TextColumn("Company"),
+                                "Ticker": st.column_config.TextColumn("Ticker"), 
+                                "Exchange": st.column_config.TextColumn("Exchange"),
+                                "Transaction Date": st.column_config.DateColumn("Transaction Date", format="DD/MM/YYYY"),
+                                "Amount (₪)": st.column_config.NumberColumn("Amount (₪)", format="₪%.2f"),
+                                "Value Change (₪)": st.column_config.NumberColumn("Value Change (₪)", format="₪%.2f"),
+                                "Current Value (₪)": st.column_config.NumberColumn("Current Value (₪)", format="₪%.2f"),
+                                "Percent Change": st.column_config.NumberColumn("Percent Change", format="%.2f%%"),
+                            },
+                            hide_index=True,
+                        )
 
                     # Display all transactions
                     st.subheader("All Transactions")
